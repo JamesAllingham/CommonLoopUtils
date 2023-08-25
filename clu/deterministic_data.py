@@ -55,7 +55,7 @@ Synopsis for deterministic training with multiple hosts:
 import enum
 import functools
 import operator
-from typing import Callable, Dict, Optional, Sequence, Union
+from typing import Callable, Dict, Literal, Optional, Sequence, Union
 
 from absl import logging
 
@@ -371,7 +371,8 @@ def create_dataset(dataset_builder: DatasetBuilder,
                    decoders: Optional[Dict[str, tfds.decode.Decoder]] = None,
                    cache: bool = False,
                    num_epochs: Optional[int] = None,
-                   shuffle: bool = True,
+                   repeat_after_batching: bool = False,
+                   shuffle: Union[Literal["loaded", "preprocessed"], bool] = "loaded",
                    shuffle_buffer_size: int = 10_000,
                    prefetch_size: int = 4,
                    pad_up_to_batches: Optional[Union[int, str]] = None,
@@ -401,7 +402,11 @@ def create_dataset(dataset_builder: DatasetBuilder,
     cache: Whether to cache the unprocessed dataset in memory.
     num_epochs: Number of epochs for which to repeat the dataset. None to repeat
       forever.
-    shuffle: Whether to shuffle the dataset (both on file and example level).
+    repeat_after_batching: Whether to `repeat` the dataset before or after batching.
+    shuffle: Whether to shuffle the dataset (both on file and example level). Either
+      shuffle unprocessed dataset in memory before preprocessing and (potentially)
+      batching ("loaded"), after preprocessing and (potentially) batching ("preprocessed"),
+      or not at all (False).
     shuffle_buffer_size: Number of examples in the shuffle buffer.
     prefetch_size: The number of elements in the final dataset to prefetch in
       the background. This should be a small (say <10) positive integer or
@@ -423,6 +428,10 @@ def create_dataset(dataset_builder: DatasetBuilder,
   Returns:
     The dataset with preprocessed and batched examples.
   """
+  assert shuffle in ("loaded", "preprocessed", False, None)
+
+  assert not ((shuffle == "preprocessed") and (not repeat_after_batching))
+
   rng_available = rng is not None
   if not rng_available and shuffle:
     raise ValueError("Please set 'rng' when shuffling.")
@@ -453,15 +462,21 @@ def create_dataset(dataset_builder: DatasetBuilder,
   if cache:
     ds = ds.cache()
 
-  if shuffle:
-    ds = ds.shuffle(shuffle_buffer_size, seed=rngs.pop()[0])
-  ds = ds.repeat(num_epochs)
+  shuffle_seed = rngs.pop()[0]
+  if shuffle == "loaded":
+    ds = ds.shuffle(shuffle_buffer_size, seed=shuffle_seed)
+
+  if not repeat_after_batching:
+    ds = ds.repeat(num_epochs)
 
   if preprocess_fn is not None:
     if rng_available:
       ds = _preprocess_with_per_example_rng(ds, preprocess_fn, rng=rngs.pop())
     else:
       ds = ds.map(preprocess_fn, num_parallel_calls=AUTOTUNE)
+
+  if shuffle == "preprocessed":
+    ds = ds.shuffle(shuffle_buffer_size, seed=shuffle_seed)
 
   if pad_up_to_batches is not None:
     assert isinstance(pad_up_to_batches, int) or pad_up_to_batches == "auto"
@@ -475,6 +490,9 @@ def create_dataset(dataset_builder: DatasetBuilder,
   if batch_dims:
     for batch_size in reversed(batch_dims):
       ds = ds.batch(batch_size, drop_remainder=drop_remainder)
+
+  if repeat_after_batching:
+    ds = ds.repeat(num_epochs)
 
   return ds.prefetch(prefetch_size)
 
@@ -495,7 +513,8 @@ def create_distributed_dataset(
     decoders: Optional[Dict[str, tfds.decode.Decoder]] = None,
     cache: bool = False,
     num_epochs: Optional[int] = None,
-    shuffle: bool = True,
+    repeat_after_batching: bool = False,
+    shuffle: Union[Literal["loaded", "preprocessed"], bool] = "loaded",
     shuffle_buffer_size: int = 10_000,
     prefetch_size: int = 4,
     pad_up_to_batches: Optional[int] = None,
@@ -521,8 +540,11 @@ def create_distributed_dataset(
     cache: Whether to cache the unprocessed dataset in memory.
     num_epochs: Number of epochs for which to repeat the dataset. None to repeat
       forever.
-    shuffle: Whether the shuffle the dataset (both on the file and example
-      level).
+    repeat_after_batching: Whether to `repeat` the dataset before or after batching.
+    shuffle: Whether to shuffle the dataset (both on file and example level). Either
+      shuffle unprocessed dataset in memory before preprocessing and (potentially)
+      batching ("loaded"), after preprocessing and (potentially) batching ("preprocessed"),
+      or not at all (False).
     shuffle_buffer_size: Number of examples in the shuffle buffer.
     prefetch_size: The number of elements in the final dataset to prefetch in
       the background. This should be a small (say <10) positive integer or
@@ -572,6 +594,7 @@ def create_distributed_dataset(
         decoders=decoders,
         cache=cache,
         num_epochs=num_epochs,
+        repeat_after_batching=repeat_after_batching,
         shuffle=shuffle,
         shuffle_buffer_size=shuffle_buffer_size,
         prefetch_size=prefetch_size,
@@ -580,3 +603,13 @@ def create_distributed_dataset(
         drop_remainder=drop_remainder)
 
   return strategy.distribute_datasets_from_function(dataset_fn)
+
+
+def start_input_pipeline(dataset):
+    ds_iter = iter(dataset)
+
+    it = (jax.tree_map(lambda xs: xs._numpy(), xs) for xs in ds_iter)
+
+    # TODO: Add prefetching? flax.jax_utils.prefetch_to_device
+
+    return it
