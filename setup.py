@@ -49,7 +49,7 @@ setup(
         "jax",
         "jaxlib",
         "ml_collections",
-        "numpy==1.23.1",
+        "numpy",
         "packaging",
         "typing_extensions",
         "wrapt",
