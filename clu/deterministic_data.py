@@ -641,11 +641,14 @@ def create_distributed_dataset(
     return strategy.distribute_datasets_from_function(dataset_fn)
 
 
+import flax
+
 def start_input_pipeline(dataset):
     ds_iter = iter(dataset)
 
     it = (jax.tree_map(lambda xs: xs._numpy(), xs) for xs in ds_iter)
 
     # TODO: Add prefetching? flax.jax_utils.prefetch_to_device
+    it = flax.jax_utils.prefetch_to_device(it, 2)
 
     return it
