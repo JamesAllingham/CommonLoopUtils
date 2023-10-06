@@ -648,7 +648,6 @@ def start_input_pipeline(dataset):
 
     it = (jax.tree_map(lambda xs: xs._numpy(), xs) for xs in ds_iter)
 
-    # TODO: Add prefetching? flax.jax_utils.prefetch_to_device
     it = flax.jax_utils.prefetch_to_device(it, 2)
 
     return it
